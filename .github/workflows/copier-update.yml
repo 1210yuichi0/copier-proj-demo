@@ -1,0 +1,78 @@
+name: Auto-update from Copier template
+
+on:
+  repository_dispatch:
+    types: [template-updated]
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  copier-update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Copier
+        run: pip install copier
+
+      - name: Get current template version
+        id: current
+        run: |
+          version=$(grep '_commit:' .copier-answers.yml | awk '{print $2}')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Run copier update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          copier update --defaults --trust --skip-answered
+
+      - name: Check for changes
+        id: changes
+        run: |
+          if git diff --quiet && git diff --staged --quiet; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get new template version
+        if: steps.changes.outputs.has_changes == 'true'
+        id: new
+        run: |
+          version=$(grep '_commit:' .copier-answers.yml | awk '{print $2}')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create Pull Request
+        if: steps.changes.outputs.has_changes == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: copier/update-${{ steps.new.outputs.version }}
+          title: "chore: update from template ${{ steps.current.outputs.version }} → ${{ steps.new.outputs.version }}"
+          body: |
+            ## Template Update
+
+            テンプレートリポジトリの更新を自動検知し、`copier update` を実行しました。
+
+            - **更新元**: `${{ steps.current.outputs.version }}` → `${{ steps.new.outputs.version }}`
+            - **トリガー**: ${{ github.event_name == 'repository_dispatch' && 'タグ push (dispatch)' || github.event_name == 'schedule' && 'スケジュール実行' || '手動実行' }}
+
+            ### 確認事項
+            - [ ] 差分が意図通りか確認
+            - [ ] テストが通るか確認
+            - [ ] プロジェクト固有のカスタマイズが上書きされていないか確認
+          labels: |
+            dependencies
+            copier-update
+          delete-branch: true
