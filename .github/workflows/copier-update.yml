@@ -10,6 +10,10 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
+
+env:
+  TEMPLATE_REPO_FALLBACK: "1210yuichi0/copier-tmpl-demo"
 
 jobs:
   copier-update:
@@ -24,21 +28,60 @@ jobs:
           python-version: "3.12"
 
       - name: Install Copier
-        run: pip install copier
+        run: pip install "copier>=9,<10"
 
       - name: Get current template version
         id: current
         run: |
-          version=$(grep '_commit:' .copier-answers.yml | awk '{print $2}')
+          pip install pyyaml -q
+          version=$(python3 -c "import yaml; print(yaml.safe_load(open('.copier-answers.yml')).get('_commit','unknown'))")
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Run copier update
+        id: update
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          copier update --defaults --trust --skip-answered
+          if copier update --defaults --trust --skip-answered 2>&1; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "::error::copier update failed (possible merge conflict)"
+          fi
+
+      - name: Create issue on copier update failure
+        if: steps.update.outputs.status == 'failed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TEMPLATE_REPO: ${{ github.event.client_payload.template_repo || env.TEMPLATE_REPO_FALLBACK }}
+          TEMPLATE_VERSION: ${{ github.event.client_payload.template_version || 'unknown' }}
+          CURRENT_VERSION: ${{ steps.current.outputs.version }}
+        run: |
+          gh label create "copier-update" --color "d93f0b" --force 2>/dev/null || true
+          gh issue create \
+            --title "⚠️ copier update failed: ${CURRENT_VERSION} → ${TEMPLATE_VERSION}" \
+            --body "$(cat <<ISSUE_EOF
+          ## copier update 失敗
+
+          テンプレート更新の自動適用に失敗しました。手動での対応が必要です。
+
+          | 項目 | 値 |
+          |------|---|
+          | **現在のバージョン** | \`${CURRENT_VERSION}\` |
+          | **更新先** | \`${TEMPLATE_VERSION}\` |
+          | **テンプレート** | [${TEMPLATE_REPO}](https://github.com/${TEMPLATE_REPO}) |
+          | **ワークフロー** | [Run #${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+
+          ### 対処手順
+          1. ローカルで \`copier update --trust\` を実行
+          2. コンフリクトを手動解決
+          3. 変更をコミット・push
+          ISSUE_EOF
+          )" \
+            --label "copier-update"
 
       - name: Check for changes
+        if: steps.update.outputs.status == 'success'
         id: changes
         run: |
           if git diff --quiet && git diff --staged --quiet; then
@@ -51,7 +94,7 @@ jobs:
         if: steps.changes.outputs.has_changes == 'true'
         id: new
         run: |
-          version=$(grep '_commit:' .copier-answers.yml | awk '{print $2}')
+          version=$(python3 -c "import yaml; print(yaml.safe_load(open('.copier-answers.yml')).get('_commit','unknown'))")
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Generate diff summary
@@ -67,6 +110,8 @@ jobs:
 
       - name: Create Pull Request
         if: steps.changes.outputs.has_changes == 'true'
+        env:
+          TEMPLATE_REPO: ${{ github.event.client_payload.template_repo || env.TEMPLATE_REPO_FALLBACK }}
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.CR_PAT }}
@@ -80,14 +125,14 @@ jobs:
             | 項目 | 値 |
             |------|---|
             | **更新元** | `${{ steps.current.outputs.version }}` → `${{ steps.new.outputs.version }}` |
-            | **テンプレート** | [${{ github.event.client_payload.template_repo || 'N/A' }}](https://github.com/${{ github.event.client_payload.template_repo || '' }}) |
+            | **テンプレート** | [${{ env.TEMPLATE_REPO }}](https://github.com/${{ env.TEMPLATE_REPO }}) |
             | **トリガー** | ${{ github.event_name == 'repository_dispatch' && 'タグ push (dispatch)' || github.event_name == 'schedule' && 'スケジュール実行' || '手動実行' }} |
 
             ### テンプレート側の変更内容
 
             ${{ github.event.client_payload.changelog || '(dispatch 以外のトリガーでは変更履歴は取得できません。テンプレートリポのリリースノートを確認してください)' }}
 
-            > 比較: [`${{ github.event.client_payload.prev_tag || steps.current.outputs.version }}`...`${{ steps.new.outputs.version }}`](https://github.com/${{ github.event.client_payload.template_repo || '' }}/compare/${{ github.event.client_payload.prev_tag || steps.current.outputs.version }}...${{ steps.new.outputs.version }})
+            > 比較: [`${{ github.event.client_payload.prev_tag || steps.current.outputs.version }}`...`${{ steps.new.outputs.version }}`](https://github.com/${{ env.TEMPLATE_REPO }}/compare/${{ github.event.client_payload.prev_tag || steps.current.outputs.version }}...${{ steps.new.outputs.version }})
 
             ### このリポへの影響（diff summary）
 
